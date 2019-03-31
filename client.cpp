@@ -4,7 +4,8 @@
 #include					<olectl.h>
 #include					<audioclient.h>
 #include					"dsound.h"
-#include					"comdata.h"	
+#include					"comdata.h"
+#include					"userlog.h"
 
 #pragma						comment(lib,"wsock32")
 #pragma						comment(lib,"dsound")
@@ -261,56 +262,52 @@ void keyboard_send(char p_type,char p_value)
 DWORD WINAPI thread1(LPVOID p_arg)
 {
 	COM_DATA com_data;
-
 	long mouse_x_old = -1;
 	long mouse_y_old = -1;
+	POINT mousePos;
+	WINDOWINFO windowInfo;
+	windowInfo.cbSize = sizeof(WINDOWINFO);
 
-	printf("Thread1 started\n");
+	//GetWindowInfo((HWND)p_arg, &windowInfo);
+	//printf("left:%d, right:%d, top:%d, bottom:%d\n", windowInfo.rcWindow.left,
+	//	windowInfo.rcWindow.right, windowInfo.rcWindow.top, windowInfo.rcWindow.bottom);
+
+	// printf("Thread1 started\n");
 
 	for (;g_end == 0;)
 	{
 		Sleep(10);
-
 		//操作系
-
 		if (g_sock1 == -1)
 		{
 			g_sock1 = socket(AF_INET,SOCK_STREAM,0);
-
 			g_sock1_ct = 0;
-
 			if (connect(g_sock1,(struct sockaddr *)&g_addr,sizeof(sockaddr_in)) == SOCKET_ERROR)
 			{
-				printf("connect error.\n");
-				printf("addr:%d, port:%d\n", (unsigned long)ntohl(g_addr.sin_addr.s_addr), g_addr.sin_port);
+				LOG_ERROR("connect error.\n");
+				LOG_ERROR("addr:%d, port:%d\n", (unsigned long)ntohl(g_addr.sin_addr.s_addr), g_addr.sin_port);
 				//接続エラー
-
 				closesocket(g_sock1);
 				g_sock1 = -1;
-
 				closesocket(g_sock2);
 				g_sock2 = -1;
-
 				closesocket(g_sock3);
 				g_sock3 = -1;
-
 				Sleep(1000);
-
 				continue;
 			}
 		}
-
 		memset(&com_data,0,sizeof(COM_DATA));
-
 		memcpy(&com_data.ver,g_connect_ver,4);
-
 		com_data.data_type = 1;
 		com_data.thread = 1;
 		com_data.mode = 5;
 		com_data.monitor_no = 1;
 
 		//操作系
-
+		if (!GetWindowInfo((HWND)p_arg, &windowInfo)) {
+			LOG_ERROR("GetWindowInfo error:%d\n", GetLastError());
+		}
 		com_data.control = 1;
 		com_data.mouse_cursor = 0;
 
@@ -321,118 +318,111 @@ DWORD WINAPI thread1(LPVOID p_arg)
 			mouse_y_old = g_mouse_y;
 		}
 
-		if (mouse_x_old != g_mouse_x || 
-			mouse_y_old != g_mouse_y)
+		GetCursorPos(&mousePos);
+		g_mouse_x = mousePos.x;
+		g_mouse_y = mousePos.y;
+
+		if ((mouse_x_old != g_mouse_x || 
+			mouse_y_old != g_mouse_y) &&
+			(windowInfo.rcClient.left < g_mouse_x &&
+			g_mouse_x < windowInfo.rcClient.right &&
+			windowInfo.rcClient.top < g_mouse_y &&
+			g_mouse_y < windowInfo.rcClient.bottom))
 		{
 			mouse_x_old = g_mouse_x;
 			mouse_y_old = g_mouse_y;
 
 			com_data.mouse_move = 1;
 
-			long x = (long)((double)g_mouse_x * ((double)g_capture_cx / (double)g_window_cx));
-			long y = (long)((double)g_mouse_y * ((double)g_capture_cy / (double)g_window_cy));
+			//long x = (long)((double)(g_mouse_x - windowInfo.rcWindow.left) * ((double)g_capture_cx / (double)g_window_cx));
+			//long y = (long)((double)(g_mouse_y - windowInfo.rcWindow.top) * ((double)g_capture_cy / (double)g_window_cy));
+			long x = g_mouse_x - windowInfo.rcClient.left;
+			long y = g_mouse_y - windowInfo.rcClient.top;
 
 			com_data.mouse_x = x;
 			com_data.mouse_y = y;
+			//printf("send mouse move <abs> x:%d y:%d <relative> x:%d, y:%d, clienttop:%d\n",
+			//	g_mouse_x, g_mouse_y, x, y, windowInfo.rcClient.top);
 		}
 
 		if (g_mouse_left[0] != 0)
 		{
 			com_data.mouse_left = g_mouse_left[0];
 		}
-
 		if (com_data.mouse_left != 0)
 		{
 			for (long sx1 = 0;sx1 < 255;sx1 ++)
 			{
 				g_mouse_left[sx1] = g_mouse_left[sx1 + 1];
 			}
-
 			g_mouse_left[255] = 0;
 		}
-
 		if (g_mouse_right[0] != 0)
 		{
 			com_data.mouse_right = g_mouse_right[0];
 		}
-
 		if (com_data.mouse_right != 0)
 		{
 			for (long sx1 = 0;sx1 < 255;sx1 ++)
 			{
 				g_mouse_right[sx1] = g_mouse_right[sx1 + 1];
 			}
-
 			g_mouse_right[255] = 0;
 		}
-
 		if (g_mouse_middle[0] != 0)
 		{
 			com_data.mouse_middle = g_mouse_middle[0];
 		}
-
 		if (com_data.mouse_middle != 0)
 		{
 			for (long sx1 = 0;sx1 < 255;sx1 ++)
 			{
 				g_mouse_middle[sx1] = g_mouse_middle[sx1 + 1];
 			}
-
 			g_mouse_middle[255] = 0;
 		}
-
 		if (g_mouse_wheel[0] != 0)
 		{
 			com_data.mouse_wheel = g_mouse_wheel[0];
 		}
-
 		if (com_data.mouse_wheel != 0)
 		{
 			for (long sx1 = 0;sx1 < 255;sx1 ++)
 			{
 				g_mouse_wheel[sx1] = g_mouse_wheel[sx1 + 1];
 			}
-
 			g_mouse_wheel[255] = 0;
 		}
-
 		if (g_mouse_x1[0] != 0)
 		{
 			com_data.mouse_x1 = g_mouse_x1[0];
 		}
-
 		if (com_data.mouse_x1 != 0)
 		{
 			for (long sx1 = 0;sx1 < 255;sx1 ++)
 			{
 				g_mouse_x1[sx1] = g_mouse_x1[sx1 + 1];
 			}
-
 			g_mouse_x1[255] = 0;
 		}
-
 		if (g_mouse_x2[0] != 0)
 		{
 			com_data.mouse_x2 = g_mouse_x2[0];
 		}
-
 		if (com_data.mouse_x2 != 0)
 		{
 			for (long sx1 = 0;sx1 < 255;sx1 ++)
 			{
 				g_mouse_x2[sx1] = g_mouse_x2[sx1 + 1];
 			}
-
 			g_mouse_x2[255] = 0;
 		}
-
 		if ((GetKeyState(VK_SHIFT) & 0x8000) != 0)
 		{
 			if (g_shift_down != 1)
 			{
 				keyboard_send((char)0x80,VK_SHIFT);
 			}
-
 			g_shift_down = 1;
 		}
 		else
@@ -441,17 +431,14 @@ DWORD WINAPI thread1(LPVOID p_arg)
 			{
 				keyboard_send((char)0x00,VK_SHIFT);
 			}
-
 			g_shift_down = 0;
 		}
-
 		if ((GetKeyState(VK_MENU) & 0x8000) != 0)
 		{
 			if (g_alt_down != 1)
 			{
 				keyboard_send((char)0x80,VK_MENU);
 			}
-
 			g_alt_down = 1;
 		}
 		else
@@ -460,17 +447,14 @@ DWORD WINAPI thread1(LPVOID p_arg)
 			{
 				keyboard_send((char)0x00,VK_MENU);
 			}
-
 			g_alt_down = 0;
 		}
-
 		if ((GetKeyState(VK_CONTROL) & 0x8000) != 0)
 		{
 			if (g_ctrl_down != 1)
 			{
 				keyboard_send((char)0x80,VK_CONTROL);
 			}
-
 			g_ctrl_down = 1;
 		}
 		else
@@ -479,17 +463,14 @@ DWORD WINAPI thread1(LPVOID p_arg)
 			{
 				keyboard_send((char)0x00,VK_CONTROL);
 			}
-
 			g_ctrl_down = 0;
 		}
-
 		if (g_shift_down != 0 ||
 			g_alt_down != 0 ||
 			g_ctrl_down != 0)
 		{
 			com_data.keydown = 1;
 		}
-
 		com_data.keycode = g_keyboard1[0];
 		com_data.keycode_flg = g_keyboard2[0];
 
@@ -509,10 +490,8 @@ DWORD WINAPI thread1(LPVOID p_arg)
 		}
 
 		JOYINFOEX gamepad_btn;
-
 		gamepad_btn.dwFlags = JOY_RETURNALL;
 		gamepad_btn.dwSize = sizeof(JOYINFOEX);
-
 		if (::joyGetPosEx(JOYSTICKID1,&gamepad_btn) == JOYERR_NOERROR)
 		{
 			com_data.gamepad1 = gamepad_btn.dwXpos;
@@ -526,6 +505,7 @@ DWORD WINAPI thread1(LPVOID p_arg)
 		}
 		else
 		{
+			// printf("joystick capture error.\n");
 			com_data.gamepad1 = 0x7fff;
 			com_data.gamepad2 = 0x7fff;
 			com_data.gamepad3 = 0x7fff;
@@ -537,7 +517,6 @@ DWORD WINAPI thread1(LPVOID p_arg)
 		}
 
 		//画像系
-
 		com_data.zoom = 1.0;
 		com_data.image_cx = g_capture_cx;
 		com_data.image_cy = g_capture_cy;
@@ -546,7 +525,6 @@ DWORD WINAPI thread1(LPVOID p_arg)
 		com_data.video_quality = 3;
 
 		//音声系
-
 		com_data.sound_type = 1;
 		com_data.sound_capture = 1;
 		com_data.sound_quality = 3;
@@ -588,7 +566,7 @@ DWORD WINAPI thread1(LPVOID p_arg)
 		if (com_data.mode == 0)
 		{
 			//パスワードエラー
-			printf("Password error.\n");
+			LOG_ERROR("Password error.\n");
 			continue;
 		}
 
@@ -607,121 +585,106 @@ DWORD WINAPI thread1(LPVOID p_arg)
 DWORD WINAPI thread2(LPVOID p_arg)
 {
 	COM_DATA com_data;
-
-	printf("Thread2 started\n");
+	WINDOWINFO windowInfo;
+	int windowWidth, windowHeight, oldWidth=0, oldHeight=0;
+	HWND hWnd = (HWND)p_arg;
 
 	for (;g_end == 0;)
 	{
 		Sleep(10);
-
 		//画像系
-
-		if (g_sock1 == -1)
+		if (g_sock1 == -1 || g_sock1_ct < 5)
 		{
 			continue;
 		}
-
-		if (g_sock1_ct < 5)
-		{
-			continue;
-		}
-
 		if (g_sock2 == -1)
 		{
 			g_sock2 = socket(AF_INET,SOCK_STREAM,0);
-
 			g_sock2_ct = 0;
-
 			if (connect(g_sock2,(struct sockaddr *)&g_addr,sizeof(sockaddr_in)) == SOCKET_ERROR)
 			{
 				//接続エラー
-				printf("Thread2 connect error.\n");
+				LOG_ERROR("Thread2 connect error.\n");
 				closesocket(g_sock2);
 				g_sock2 = -1;
-
 				continue;
 			}
 		}
-
 		//ヘッダー受信
 		//printf("Thread2 receive wait(image header).\n");
 		if (recv_data(&g_sock2,(char *)&com_data,sizeof(COM_DATA)) < 0)
 		{
-			printf("Thread2 receive error(image header).\n");
+			LOG_ERROR("Thread2 receive error(image header).\n");
+			LOG_ERROR("Error %d occured.\n", WSAGetLastError());
 			closesocket(g_sock1);
 			g_sock1 = -1;
-
 			closesocket(g_sock2);
 			g_sock2 = -1;
-
 			closesocket(g_sock3);
 			g_sock3 = -1;
-
 			continue;
 		}
 
 		long image_size = com_data.data_size;
-
 		char *image_buf = (char *)malloc(image_size);
-
 		//本体受信
 		//printf("Thread2 receive wait(image data).\n");
 		if (recv_data(&g_sock2,(char *)image_buf,image_size) < 0)
 		{
-			printf("Thread2 receive error(image data).\n");
+			LOG_ERROR("Thread2 receive error(image data).\n");
+			LOG_ERROR("Error %d occured.\n", WSAGetLastError());
 			free(image_buf);
-			
 			closesocket(g_sock1);
 			g_sock1 = -1;
-
 			closesocket(g_sock2);
 			g_sock2 = -1;
-
 			closesocket(g_sock3);
 			g_sock3 = -1;
-
 			continue;
 		}
 
-		//描画
+		//ウィンドウサイズの変更
+		GetWindowInfo(hWnd, &windowInfo);
+		windowWidth = ( windowInfo.rcWindow.right - windowInfo.rcWindow.left )
+					 - ( windowInfo.rcClient.right - windowInfo.rcClient.left )
+					 + com_data.server_cx;
+		windowHeight = ( windowInfo.rcWindow.bottom - windowInfo.rcWindow.top )
+					 - ( windowInfo.rcClient.bottom - windowInfo.rcClient.top )
+					 + com_data.server_cy;
+		if (windowWidth != oldWidth || windowHeight != oldHeight){
+			SetWindowPos(hWnd, NULL, 0, 0, windowWidth, windowHeight, SWP_NOMOVE | SWP_NOZORDER);
+			oldWidth = windowWidth;
+			oldHeight = windowHeight;
+			g_window_cx = com_data.server_cx;
+			g_window_cy = com_data.server_cy;
+			GetWindowInfo(hWnd, &windowInfo);
+			// LOG_INFO("Client area size: %d, %d\n", windowInfo.rcClient.right - windowInfo.rcClient.left,
+			//		windowInfo.rcClient.bottom - windowInfo.rcClient.top);
+		}
 
+		//描画
 		IPicture *pic;
 		IStream *str;
-		long cx;
-		long cy;
-
+		long cx, cy;
 		HDC hdc = GetDC(g_hwnd);
-
 		HGLOBAL hgbl = GlobalAlloc(GPTR,image_size);
-
 		memcpy(hgbl,image_buf,image_size);
-
 		CreateStreamOnHGlobal(hgbl,TRUE,&str);
-
 		OleLoadPicture(str,image_size,TRUE,IID_IPicture,(LPVOID*)&pic);
-
 		pic->get_Width(&cx);
 		pic->get_Height(&cy);
-
 		pic->Render(hdc,0,0,g_window_cx,g_window_cy,0,cy,cx,-cy,0);
-
 		pic->Release();
 		str->Release();
-
 		GlobalUnlock(hgbl);
-
 		ReleaseDC(g_hwnd,hdc);
-
 		free(image_buf);
-
 		if (g_sock2_ct < 999)
 		{
 			g_sock2_ct ++;
 		}
 	}
-
 	ExitThread(TRUE);
-
 	return 0;
 }
 
@@ -730,24 +693,16 @@ DWORD WINAPI thread3(LPVOID p_arg)
 {
 	COM_DATA com_data;
 
-	printf("Thread3 started\n");
+	// printf("Thread3 started\n");
 
 	for (;g_end == 0;)
 	{
 		Sleep(10);
-
 		//音声系
-
-		if (g_sock2 == -1)
+		if (g_sock2 == -1 || g_sock2_ct < 5)
 		{
 			continue;
 		}
-
-		if (g_sock2_ct < 5)
-		{
-			continue;
-		}
-
 		if (g_sock3 == -1)
 		{
 			g_sock3 = socket(AF_INET,SOCK_STREAM,0);
@@ -755,13 +710,12 @@ DWORD WINAPI thread3(LPVOID p_arg)
 			if (connect(g_sock3,(struct sockaddr *)&g_addr,sizeof(sockaddr_in)) == SOCKET_ERROR)
 			{
 				//接続エラー
- 				printf("Thread3 connect error.\n");
+ 				LOG_ERROR("Thread3 connect error.\n");
 				closesocket(g_sock3);
 				g_sock3 = -1;
 
 				continue;
 			}
-
 			g_ds = 0;
 			g_dsb = 0;
 			g_ca_format = 0;
@@ -771,30 +725,24 @@ DWORD WINAPI thread3(LPVOID p_arg)
 		// printf("Thread3 receive wait(sound header).\n");
 		if (recv_data(&g_sock3,(char *)&com_data,sizeof(COM_DATA)) < 0)
 		{
-			printf("Thread3 receive error(sound header).\n");
+			LOG_ERROR("Thread3 receive error(sound header).\n");
 			closesocket(g_sock3);
 			g_sock3 = -1;
-
 			ds_exit();
-
 			continue;
 		}
 
 		long samplerate = com_data.samplerate;
-
 		long sound_size = com_data.data_size;
 		char *sound_buf = (char *)malloc(sound_size);
-
 		//本体受信
 		// printf("Thread3 receive wait(sound data).\n");
 		if (recv_data(&g_sock3,(char *)sound_buf,sound_size) < 0)
 		{
-			printf("Thread3 receive error(sound data).\n");
+			LOG_ERROR("Thread3 receive error(sound data).\n");
 			closesocket(g_sock3);
 			g_sock3 = -1;
-
 			ds_exit();
-
 			continue;
 		}
 
@@ -808,30 +756,22 @@ DWORD WINAPI thread3(LPVOID p_arg)
 		{
 			LPVOID	lock_data;
 			DWORD	lock_size;
-
 			g_dsb->Lock(0,g_ca_format->Format.nAvgBytesPerSec * 3,&lock_data,&lock_size,0,0,0);
-
 			if (g_ds_sound_pt + com_data.data_size <= long(g_ca_format->Format.nAvgBytesPerSec) * 3)
 			{
 				memcpy((char *)lock_data + g_ds_sound_pt,sound_buf,long(com_data.data_size));
-
 				g_ds_sound_pt += long(com_data.data_size);
 			}
 			else
 			{
 				long pt = g_ca_format->Format.nAvgBytesPerSec * 3 - g_ds_sound_pt;
-
 				memcpy((char *)lock_data + g_ds_sound_pt,sound_buf,pt);
 				memcpy((char *)lock_data,sound_buf + pt,long(com_data.data_size) - pt);
-
 				g_ds_sound_pt = long(com_data.data_size) - pt;
 			}
-
 			g_dsb->Unlock(lock_data,lock_size,0,0);
-
 			DWORD status;
 			g_dsb->GetStatus(&status);
-
 			if (g_ds_sound_pt >= long(double(g_ca_format->Format.nAvgBytesPerSec) * 0.1))
 			{
 				if ((status & DSBSTATUS_PLAYING) == 0)
@@ -840,14 +780,10 @@ DWORD WINAPI thread3(LPVOID p_arg)
 				}
 			}
 		}
-
 		free(sound_buf);
 	}
-
 	ds_exit();
-
 	ExitThread(TRUE);
-
 	return 0;
 }
 
@@ -1059,11 +995,11 @@ int WINAPI WinMain(HINSTANCE hInst,HINSTANCE hPrevInstance,LPSTR lpCmdLine,int n
 	g_encryption_key = (char *)malloc(17);
 	g_connect_ver = (char *)malloc(5);
 
-	g_window_cx = 960;										//ウインドウ幅
-	g_window_cy = 540;										//ウインドウ高さ
+	g_window_cx = 800;										//ウインドウ幅
+	g_window_cy = 480;										//ウインドウ高さ
 
-	g_capture_cx = 1920;									//キャプチャー幅
-	g_capture_cy = 1080;									//キャプチャー高さ
+	g_capture_cx = 800;									//キャプチャー幅
+	g_capture_cy = 480;									//キャプチャー高さ
 
 	strcpy(g_connect_ver,"0000");							//通信バージョン
 
@@ -1094,7 +1030,7 @@ int WINAPI WinMain(HINSTANCE hInst,HINSTANCE hPrevInstance,LPSTR lpCmdLine,int n
 
 	CreateWindowEx(WS_EX_CLIENTEDGE,"Edit","192.168.11.8",WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL,310,268,134,21,g_hwnd,(HMENU)65100,0,0);
 	CreateWindowEx(WS_EX_CLIENTEDGE,"Edit","55500",WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL,444,268,67,21,g_hwnd,(HMENU)65101,0,0);
-	CreateWindowEx(WS_EX_CLIENTEDGE,"Edit","",WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL | ES_PASSWORD,511,268,134,21,g_hwnd,(HMENU)65102,0,0);
+	CreateWindowEx(WS_EX_CLIENTEDGE,"Edit","1234",WS_VISIBLE | WS_CHILD | WS_TABSTOP | ES_CENTER | ES_AUTOHSCROLL | ES_PASSWORD,511,268,134,21,g_hwnd,(HMENU)65102,0,0);
 
 	CreateWindowEx(0,"Button","Ok",WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,645,268,31,20,g_hwnd,(HMENU)65200,0,0);
 
@@ -1145,7 +1081,7 @@ int WINAPI WinMain(HINSTANCE hInst,HINSTANCE hPrevInstance,LPSTR lpCmdLine,int n
 	GetWindowText(GetDlgItem(g_hwnd,65101),data,6);
 	// g_port = (unsigned short)_wtol(data);
 	g_port = (unsigned short)atol(data);
-	printf("port: %d\n", g_port);
+	// printf("port: %d\n", g_port);
 
 	memset(&data,0,sizeof(data));
 	GetWindowText(GetDlgItem(g_hwnd,65102),data,17);
@@ -1176,8 +1112,8 @@ int WINAPI WinMain(HINSTANCE hInst,HINSTANCE hPrevInstance,LPSTR lpCmdLine,int n
 
 	if (g_end == 0)
 	{
-		hthd1 = CreateThread(0,0,thread1,0,0,0);
-		hthd2 = CreateThread(0,0,thread2,0,0,0);
+		hthd1 = CreateThread(0,0,thread1,g_hwnd,0,0);
+		hthd2 = CreateThread(0,0,thread2,g_hwnd,0,0);
 		hthd3 = CreateThread(0,0,thread3,0,0,0);
 	}
 
