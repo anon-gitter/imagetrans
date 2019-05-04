@@ -274,8 +274,7 @@ namespace vJoyNS {
 			VJD = vJoy Device
 			rID = Report ID
 	*/
-#pragma warning( push )
-#pragma warning( disable : 4995 )
+
 	/////	General driver data
 	VJOYINTERFACE_API SHORT __cdecl GetvJoyVersion(void);
 	VJOYINTERFACE_API BOOL	__cdecl vJoyEnabled(void);
@@ -325,7 +324,6 @@ namespace vJoyNS {
 	VJOYINTERFACE_API BOOL		__cdecl	SetContPov(DWORD Value, UINT rID, UCHAR nPov);	// Write Value to a given continuous POV defined in the specified VDJ 
 
 
-#pragma region FFB Function prototypes
 // Force Feedback (FFB) functions
 	VJOYINTERFACE_API FFBEType	__cdecl	FfbGetEffect();	// Returns effect serial number if active, 0 if inactive
 	VJOYINTERFACE_API VOID		__cdecl	FfbRegisterGenCB(FfbGenCB cb, PVOID data);
@@ -357,9 +355,7 @@ namespace vJoyNS {
 
 	// Added in 2.1.6
 	VJOYINTERFACE_API DWORD		__cdecl Ffb_h_Eff_Constant(const FFB_DATA * Packet, FFB_EFF_CONSTANT *  ConstantEffect);
-#pragma endregion
 
-#pragma warning( pop )
 #ifndef STATIC
 	} // extern "C"
 #else

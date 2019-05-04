@@ -1,4 +1,4 @@
-﻿struct COM_DATA													//ヘッダー（256byte）
+﻿typedef struct													//ヘッダー（256byte）
 {
 	char					data_type;							//1:通常データ
 	char					thread;								//1:操作系,2:画像系,3:音声系
@@ -11,8 +11,9 @@
 	char					___filler_2[3];
 
 	long					data_size;							//データサイズ
+	long					original_size;						//圧縮前のサイズ
 
-	char					___filler_3[4];
+	// char					___filler_3[4];
 
 	char					check_digit_enc[16];				//チェックディジット（ハッシュ化）
 
@@ -96,4 +97,4 @@
 
 	//256
 
-};
+} COM_DATA;

@@ -9,35 +9,78 @@
 #include <locale.h>
 #include <tlhelp32.h>
 #include <Gdiplus.h>
+#include <sys/stat.h>
+#include <pthread.h>
+#include <zlib.h>
 #include "comdata.h"
 #include "wavestruct.h"
 #include "public.h"
 #include "vjoyinterface.h"
 #include "turbojpeg.h"
 #include "userlog.h"
+#include "vpxConverter.h"
+#include "lz4.h"
+#include "opus.h"
+#include "opus_custom.h"
 
-#pragma comment(lib, "wsock32.lib")
-#pragma comment(lib, "dsound.lib")
-#pragma comment(lib, "winmm.lib")
+int pcm2opus(OpusCustomEncoder *encoder, char *buf, int dataSize, unsigned char **cbits){
+    // const int SAMPLE_RATE = 48000;
+    const int MAX_PACKET_SIZE = 1000000;
+    const int FRAME_SIZE = 64;
+    opus_int16 in[dataSize/2];
+    /* Convert from little-endian ordering. */
+    for (int i=0;i<(dataSize/2);i++)
+        in[i]=buf[2*i+1]<<8|buf[2*i];
 
-char g_encryption_key[16];
-
-int dumpBinary(unsigned char* data, int size)
-{
-    int flag = 0;
-    int i=0, j=0;
-
-    while (flag==0) {
-        for (j=0; j<8; j++) {
-            LOG_INFO("%02x ", *(data+(i*8+j)));
-            if ((i*8+j)>=size){
-                flag = 1;
-                break;
-            }
+    int opusEncodedBytes=0;
+    int FRAME_OFFSET = FRAME_SIZE*CHANNELS*BITSPERSAMPLE/8;
+    /* Encode the frame. */
+    *cbits = (unsigned char*)malloc(MAX_PACKET_SIZE);
+    for(int i=0;i<(dataSize-FRAME_OFFSET);i+=FRAME_OFFSET){
+        int nbBytes = opus_custom_encode(encoder, &in[0]+FRAME_OFFSET/2, FRAME_SIZE, \
+            (*cbits)+opusEncodedBytes, MAX_PACKET_SIZE);
+        if (nbBytes<0)
+        {
+            LOG_ERROR("encode failed: %s\n", opus_strerror(nbBytes));
+            // return EXIT_FAILURE;
+        } else {
+            opusEncodedBytes += nbBytes;
         }
-        LOG_INFO("\n");
-        i++;
     }
+    return opusEncodedBytes;
+}
+
+long bmp2lz4(unsigned char *bmpData, long bmpSize, unsigned char **zData, unsigned long *zSize) {
+    // LARGE_INTEGER start, end, freq;
+    *zSize = LZ4_compressBound(bmpSize);
+    *zData = (unsigned char*)malloc(*zSize+sizeof(COM_DATA));
+    // QueryPerformanceCounter(&start);
+    int ret = LZ4_compress_default((char*)bmpData, (char*)*zData, bmpSize, *zSize);
+    if (ret == 0) {
+        printf("LZ4 compress error. %d\n", ret);
+    }
+    // QueryPerformanceCounter(&end);
+    // QueryPerformanceFrequency(&freq);
+    // LOG_INFO("zlib convert:%fs ", (float(end.QuadPart-start.QuadPart)/(float)freq.QuadPart));
+    *zSize = ret;
+    // printf("compressed %ld -> %lu\n", bmpSize, *zSize);
+    return ret;
+}
+
+int bmp2z(unsigned char *bmpData, long bmpSize, unsigned char **zData, unsigned long *zSize) {
+    //LARGE_INTEGER start, end, freq;
+    *zSize = compressBound(bmpSize);
+    *zData = (unsigned char*)malloc(*zSize);
+    //QueryPerformanceCounter(&start);
+    int ret = compress( *zData, zSize, bmpData, bmpSize );
+    if (ret != Z_OK) {
+        LOG_ERROR("Zlib compress error. %d\n", ret);
+    }
+    // LOG_DEBUG("compressed %ld -> %ld\n", bmpSize, *zSize);
+    // writeFile(bmpData, bmpSize, "pic/cantalloc.bmp");
+    //QueryPerformanceCounter(&end);
+    //QueryPerformanceFrequency(&freq);
+    //LOG_INFO("zlib convert:%f s", (float(end.QuadPart-start.QuadPart)/(float)freq.QuadPart));
     return 0;
 }
 
@@ -51,64 +94,6 @@ BOOL CALLBACK DSEnumProc(LPGUID lpGUID,
     }
     return TRUE;
 } 
-
-int showBitmapInfo(BITMAP bitmap) {
-
-    /* BITMAP structure
-    typedef struct tagBITMAP {
-    int bmType;  
-    int bmWidth;  
-    int bmHeight;  
-    int bmWidthBytes;  
-    BYTE bmPlanes;  
-    BYTE bmBitsPixel;  
-    LPVOID bmBits;
-    } BITMAP;
-    */
-
-    /* BITMAPFILEHEADER
-    typedef struct tagBITMAPFILEHEADER { // bmfh 
-        WORD    bfType;             // =="BM"==0x424D
-        DWORD   bfSize;             // ファイル全体のサイズ(バイト単位)
-        WORD    bfReserved1;        // ==0（予約済）
-        WORD    bfReserved2;        // ==0（予約済）
-        DWORD   bfOffBits;          // ピクセルビットのオフセット
-    } BITMAPFILEHEADER;
-    */
-
-    /* BITMAPINFOHEADER
-    typedef struct tagBITMAPINFOHEADER{ // bmih 
-        DWORD  biSize;              // 構造体サイズ==40
-        LONG   biWidth;             // 画像横幅
-        LONG   biHeight;            // 画像高さ
-        WORD   biPlanes;            // ==1(Windows初期の名残）
-        WORD   biBitCount;          // カラービット数(1, 4, 8, 16, 24, 32)
-        DWORD  biCompression;       // 圧縮コード(BI_RGB, BI_RLE4, BI_RLE8, BI_BITFIELDSのいずれか)
-        DWORD  biSizeImage;         // イメージのバイト数
-        LONG   biXPelsPerMeter;     // 水平解像度
-        LONG   biYPelsPerMeter;     // 垂直解像度
-        DWORD  biClrUsed;           // カラーテーブルの数
-        DWORD  biClrImportant;      // 重要な色の数
-    } BITMAPINFOHEADER;
-    */
-
-    /* BMP File size calclation memo
-    DWORD BPP = bmpInfo.bmiHeader.biBitCount;
-    DWORD bytesPerPixel = BPP / 8;
-    DWORD lineSizeDW = bytesPerPixel * width;
-    lineSizeDW = (int)ceil((double)lineSizeDW / (double)sizeof(DWORD));
-    DWORD lineSize = lineSizeDW * sizeof(DWORD);
-    DWORD imageSize = lineSize * height;
-    dwLoadSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFO) + imageSize;
-    */
-
-    LOG_INFO("bfType=%x, width=%d, height=%d, bmWidthBytes=%d\n",
-        bitmap.bmType, bitmap.bmWidth, bitmap.bmHeight, bitmap.bmWidthBytes);
-    LOG_INFO("bmPlanes=%d, bmBitsPixel=%d, bmBits=%d\n",
-        bitmap.bmPlanes, bitmap.bmBitsPixel, bitmap.bmBits);
-
-    return 0;
-}
 
 int vJoyInit(int vJoyId) {
 
@@ -154,6 +139,7 @@ int vJoyInit(int vJoyId) {
     };
 
     // Check which axes are supported
+    /*
     BOOL AxisX  = GetVJDAxisExist(iInterface, HID_USAGE_X);
     BOOL AxisY  = GetVJDAxisExist(iInterface, HID_USAGE_Y);
     BOOL AxisZ  = GetVJDAxisExist(iInterface, HID_USAGE_Z);
@@ -162,6 +148,7 @@ int vJoyInit(int vJoyId) {
     // Get the number of buttons supported by this vJoy device
     int nButtons  = GetVJDButtonNumber(iInterface);
     int povNumber = GetVJDContPovNumber(iInterface);
+    */
     // Print results
     /*
     printf("\nvJoy Device %d capabilities\n", iInterface);
@@ -186,11 +173,11 @@ int vJoyInit(int vJoyId) {
     return 0;
 }
 
-struct Addrs {
+typedef struct {
         HWND hwnd;
         HWND targetHwnd;
         SOCKET* socket;
-};
+} Addrs;
 
 HWND getWindowHandleFileName(char *processName) {
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -222,117 +209,13 @@ HWND getWindowHandleFileName(char *processName) {
     return NULL;
 }
 
-HWND GetWindowHandleByPID(const DWORD targetPID){
-    HWND hWnd = GetTopWindow(NULL);
-    do {
-        if (GetWindowLong( hWnd, GWL_HWNDPARENT) != 0 || !IsWindowVisible( hWnd)) {
-            continue;
-        }
-        DWORD getPID;
-        GetWindowThreadProcessId( hWnd, &getPID);
-        if (targetPID == getPID) {
-            return hWnd;
-        }
-    } while((hWnd = GetNextWindow( hWnd, GW_HWNDNEXT)) != NULL);
-     
-    return NULL;
-}
-
-HWND GetWindowHandleByName(const char exeName[]) {
-    DWORD allProc[1024];
-    DWORD cbNeeded;
-    int nProc;
-    int i;
-    // PID一覧を取得
-    if (!EnumProcesses(allProc, sizeof(allProc), &cbNeeded)) {
-        return NULL;
-    }
-     
-    nProc = cbNeeded / sizeof(DWORD);
-    for (i = 0; i < nProc; i++) {
-        char procName[MAX_PATH] = TEXT("<unknown>");
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION |
-                                      PROCESS_VM_READ,
-                                      FALSE, allProc[i]);
-         
-        // プロセス名を取得
-        if (NULL != hProcess) {
-            HMODULE hMod;
-            DWORD cbNeeded;
-            if (EnumProcessModules(hProcess, &hMod, sizeof(hMod), 
-                                   &cbNeeded)) {
-                GetModuleBaseName(hProcess, hMod, procName, 
-                                  sizeof(procName)/sizeof(TCHAR));
-            }
-        }
-        if (!lstrcmpi(procName, exeName)) {
-            return GetWindowHandleByPID(allProc[i]);
-        }
-        CloseHandle(hProcess);
-    }
-    return NULL;
-}
-
-int GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
-{
-    UINT  num = 0;          // number of image encoders
-    UINT  size = 0;         // size of the image encoder array in bytes
-
-    Gdiplus::ImageCodecInfo* pImageCodecInfo = NULL;
-
-    Gdiplus::GetImageEncodersSize(&num, &size);
-    if(size == 0)
-        return -1;  // Failure
-
-    pImageCodecInfo = (Gdiplus::ImageCodecInfo*)(malloc(size));
-    if(pImageCodecInfo == NULL)
-        return -1;  // Failure
-
-    GetImageEncoders(num, size, pImageCodecInfo);
-
-    for(UINT j = 0; j < num; ++j)
-    {
-        if( wcscmp(pImageCodecInfo[j].MimeType, format) == 0 )
-        {
-            *pClsid = pImageCodecInfo[j].Clsid;
-            free(pImageCodecInfo);
-            return j;  // Success
-        }    
-    }
-
-    free(pImageCodecInfo);
-    return -1;  // Failure
-}
-
-int writeFile(unsigned char* data, long dataSize, char* fileName) {
-    FILE *fp;
-    long ret;
-
-    fp = fopen(fileName, "wb");
-    if ( fp == NULL ) {
-        LOG_ERROR("Can't open file %s.\n", fileName);
-        return -1;
-    } else {
-        ret = fwrite(data, dataSize, 1, fp);
-        if ( ret < 1) {
-            LOG_ERROR("Can't write file %s\n", fileName);
-            fclose(fp);
-            return -1;
-        }
-        fclose(fp);
-        LOG_INFO("File %s written, %d files.\n", fileName, ret);
-    }
-
-    return 0;
-}
-
 int bmp2jpg(BYTE *bmpData, int bmpSize, int width, int height, BYTE** jpegBuf, unsigned long *jpegSize) {
-    tjhandle _jpegCompressor = tjInitCompress();
-    int inSubsamp, outSubsamp = TJSAMP_444, inColorspace, pixelFormat = TJPF_BGR;
+    // tjhandle _jpegCompressor = tjInitCompress();
+    int /*inSubsamp,*/ outSubsamp = TJSAMP_444, /*inColorspace,*/ pixelFormat = TJPF_BGR;
     int outQual = 95, flags=0;
     tjhandle tjInstance = NULL;
-    unsigned char *imgBuf = NULL;
-    FILE *bmpFile, *jpegFile;
+    // unsigned char *imgBuf = NULL;
+    // FILE *bmpFile, *jpegFile;
     const int BMPHEADERSIZE = 54;
 
     /*
@@ -437,211 +320,8 @@ int bmp2jpg(BYTE *bmpData, int bmpSize, int width, int height, BYTE** jpegBuf, u
     return 1;
 }
 
-byte* readSoundData(long* dataSize){
-    const char*        FileName = "musicbox2.wav";// 再生したいWaveファイル
-    byte* waveData;
-    
-    WAVEFORMATEX        WaveFormat;                 // Waveフォーマット
-    // byte*               WaveData;                   // 音の生データ
-    // int                 DataSize;                   // データサイズ
-    // バイナリ読み込みモードで開く
-    FILE* fp;
-    if (!(fp = fopen(FileName, "rb"))) {
-        LOG_ERROR("Failed to open sound file.\n");
-        return NULL;
-    }
-
-    char chunkId[5] = {};
-    char tmp[5] = {};
-    unsigned int chunkSize = 0;
-
-    // RIFFチャンク読み込み
-    fread(chunkId, sizeof(char) * 4, 1, fp);
-    fread(&chunkSize, sizeof(unsigned int), 1, fp);
-    fread(tmp, sizeof(char) * 4, 1, fp);
-    if (strcmp(chunkId, "RIFF") || strcmp(tmp, "WAVE")){
-        LOG_ERROR("Specified file is not wave file.\n");
-        return NULL;  // WAVファイルじゃない
-    }
-
-    // 子チャンク読み込み
-    bool fmtchunk   = false;
-    bool datachunk  = false;
-    while (true)
-    {
-        fread(chunkId, sizeof(char) * 4, 1, fp);
-        fread(&chunkSize, sizeof(unsigned int), 1, fp);
-        if (!strcmp(chunkId, "fmt "))
-        {
-            if (chunkSize >= sizeof(WAVEFORMATEX))
-            {
-                fread(&WaveFormat, sizeof(WAVEFORMATEX), 1, fp);
-                int diff = chunkSize - sizeof(WAVEFORMATEX);
-                fseek(fp, diff, SEEK_CUR);
-            }
-            else
-            {
-                memset(&WaveFormat, 0, sizeof(WAVEFORMATEX));
-                fread(&WaveFormat, chunkSize, 1, fp);
-            }
-            fmtchunk = true;
-        }
-        else if (!strcmp(chunkId, "data"))
-        {
-            // データサイズ確保
-            *dataSize = chunkSize;
-            // WaveData = new byte[chunkSize];
-            waveData = (byte*)malloc(chunkSize);
-            // データ読み込み
-            if (fread(waveData, sizeof(byte), chunkSize, fp) != chunkSize)
-            {
-                LOG_ERROR("File broken\n");
-                fclose(fp);
-                return NULL;  // ファイルが壊れている
-            }
-            datachunk = true;
-        }
-        else
-        {
-            fseek(fp, chunkSize, SEEK_CUR);
-        }
-
-        if (fmtchunk && datachunk)
-            break;
-
-        // ファイルサイズチェックも行なった方がいいかも
-    }
-    
-    fclose(fp);
-    LOG_INFO("In readSoundData  wave data: %x, size: %d\n", waveData, *dataSize);
-    LOG_INFO("Sample rate: %d\n.", WaveFormat.nSamplesPerSec);
-
-    return waveData;
-}
-
-//送信処理
-long send_data_enc(SOCKET *p_sock,char *p_buf,long p_size){
-    char key[16 + 1];
-    memset(&key,'@',sizeof(key));
-    key[16] = 0x00;
-
-    for (long sx1 = 0;sx1 < 16;sx1 ++)
-    {
-        if (g_encryption_key[sx1] == 0x00)
-        {
-            break;
-        }
-
-        key[sx1] = g_encryption_key[sx1];
-    }
-
-    COM_DATA *com_data = (COM_DATA*)p_buf;
-    long data_long = com_data->data_type + (com_data->data_size & 0x0000ffff);
-
-    com_data->encryption = 0;
-    com_data->check_digit = ~data_long;
-
-    for (long sx1 = 0;sx1 < 16;sx1 ++)
-    {
-        char key_char = ~key[sx1];
-        key_char += (char)(sx1 * ~com_data->check_digit);
-        com_data->check_digit_enc[sx1] = key_char;
-    }
-
-    return send(*p_sock,p_buf,p_size,0);
-}
-
-//送信処理
-long send_data(SOCKET *p_sock,char *p_buf,long p_size){
-    char key[16 + 1];
-    memset(&key,'@',sizeof(key));
-    key[16] = 0x00;
-
-    for (long sx1 = 0;sx1 < 16;sx1 ++)
-    {
-        if (g_encryption_key[sx1] == 0x00)
-        {
-            break;
-        }
-
-        key[sx1] = g_encryption_key[sx1];
-    }
-
-    COM_DATA *com_data = (COM_DATA*)p_buf;
-    long data_long = com_data->data_type + (com_data->data_size & 0x0000ffff);
-
-    com_data->encryption = 0;
-    com_data->check_digit = ~data_long;
-
-    for (long sx1 = 0;sx1 < 16;sx1 ++)
-    {
-        char key_char = ~key[sx1];
-        key_char += (char)(sx1 * ~com_data->check_digit);
-        com_data->check_digit_enc[sx1] = key_char;
-    }
-
-    return send(*p_sock,p_buf,p_size,0);
-}
-
-//受信処理
-long recv_data(SOCKET *p_sock,char *p_buf,long p_size){
-    long size = 0;
-
-    for (;size < p_size;)
-    {
-        long ret = recv(*p_sock,p_buf + size,p_size - size,0);
-
-        if (ret > 0)
-        {
-            size += ret;
-        }
-        else
-        {
-            size = -1;
-
-            break;
-        }
-    }
-
-    return size;
-}
-
-int startListen_old(SOCKET acceptSoc, SOCKADDR_IN addr){
-    // SOCKET acceptSoc;
-    acceptSoc = socket(AF_INET, SOCK_STREAM, 0);
-
-    if( acceptSoc == INVALID_SOCKET){
-        LOG_ERROR("Failed to create socket.\n");
-        LOG_ERROR("Error %d occured.\n", WSAGetLastError());
-        return -1;
-    } else {
-        // ソケットのアドレス情報記入
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(55500);
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-        // ソケットをアドレスにバインドする
-        if( bind(acceptSoc, (LPSOCKADDR)&addr, sizeof(addr) ) != SOCKET_ERROR){
-            // 接続を聴取する
-            if( listen(acceptSoc, 3) != SOCKET_ERROR){
-                LOG_ERROR("Wait for client...(sock:%d)\n", acceptSoc);
-                return 0;
-            }
-            else{
-                LOG_ERROR("Listen error.\n");
-                LOG_ERROR("Error %d occured.\n", WSAGetLastError());
-                return -1;
-            }
-        }
-        else{
-            LOG_ERROR("Bind error\n");
-            LOG_ERROR("Error %d occured.\n", WSAGetLastError());
-            return -1;
-        }
-    }
-}
-
-int startListen(SOCKET* listenSock, SOCKADDR_IN addr){
+int startListen(SOCKET* listenSock){
+    SOCKADDR_IN addr;
     *listenSock = socket(AF_INET, SOCK_STREAM, 0);
     if( *listenSock == INVALID_SOCKET){
         LOG_ERROR("Failed to create socket.\n");
@@ -675,17 +355,33 @@ int startListen(SOCKET* listenSock, SOCKADDR_IN addr){
     return 0;
 }
 
-int acceptLoop(SOCKET *listenSocket, SOCKET *serverSocket) {
-    const int RECVSIZE = 256;
-    SOCKET g_sock1, clientSoc;
-    g_sock1 = socket(AF_INET,SOCK_STREAM,0);
+int startListenUDP(SOCKET* listensock) {
     SOCKADDR_IN addr;
+    *listensock = socket(AF_INET, SOCK_DGRAM, 0);
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(55500);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if( bind(*listensock, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR ){
+        LOG_ERROR("UDP bind error.\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+int acceptLoop(SOCKET *listenSocket, SOCKET *serverSocket) {
+    // const int RECVSIZE = 256;
+    //SOCKET g_sock1/*, clientSoc*/;
+    //g_sock1 = socket(AF_INET,SOCK_STREAM,0);
+    // SOCKADDR_IN addr;
     SOCKADDR_IN clientAddr;
-    IN_ADDR clientIn;
+    //IN_ADDR clientIn;
     int nClientAddrLen;
 
     // printf("Accept loop started!\n");
-    g_sock1 = -1;
+    //g_sock1 = -1;
 
     // printf("クライアントの接続待ち・・・\n");
     // クライアントのアドレス構造体の大きさを設定する
@@ -693,166 +389,25 @@ int acceptLoop(SOCKET *listenSocket, SOCKET *serverSocket) {
 
     // printf("Socket state -> listen:%d, server:%d\n", *listenSocket, *serverSocket);
 
-    // 接続の受容
     *serverSocket = accept(*listenSocket, (LPSOCKADDR)&clientAddr, &nClientAddrLen);
-    if(*serverSocket != INVALID_SOCKET){
-        memcpy(&clientIn, &clientAddr.sin_addr.s_addr, 4);
-        // printf("Connected. Client IP:%s\n", inet_ntoa(clientIn));
+    if(*serverSocket == INVALID_SOCKET){
+        LOG_ERROR("Error %d occured.\n", WSAGetLastError());
+        return -1;   
     }
     else{
-        LOG_ERROR("Connect error.\n");
-        LOG_ERROR("Error %d occured.\n", WSAGetLastError());
-        return -1;
+        // memcpy(&clientIn, &clientAddr.sin_addr.s_addr, 4);
+        // printf("Connected. Client IP:%s\n", inet_ntoa(clientIn));
+        LOG_INFO("Operate socket accepted.\n");
     }
     return 0;
 }
 
-/* This function is for VJoy 1.2
-DWORD WINAPI runOperateThread_vjoy1_2(LPVOID param) {
-    COM_DATA com_data;
-    Addrs addrs = *(Addrs*)param;
-    SOCKET *serverSocket = addrs.socket;
-    int mouse_x=0, mouse_y=0;
-    int mouse_left=0, mouse_right=0, mouse_middle=0, mouse_wheel=0;
-
-    HINSTANCE hinst;
-    JOYSTICK_STATE joyState[2] = {0};
-    int (*fp_VJoy_Initialize)(char*, char*);
-    int (*fp_VJoy_UpdateJoyState)(int,  JOYSTICK_STATE*);
-    int (*fp_VJoy_Shutdown)();
-
-    BOOL c;
-    printf("started.\n");
-    if ((hinst = LoadLibrary("VJoy32.dll")) == NULL) {
-        printf("Error LoadLibrary\n");
-    }
-    fp_VJoy_Initialize = (int (*)(char*, char*))GetProcAddress(hinst, "VJoy_Initialize");
-    fp_VJoy_UpdateJoyState = (int (*)(int, JOYSTICK_STATE*))GetProcAddress(hinst, "VJoy_UpdateJoyState");
-    fp_VJoy_Shutdown = (int (*)())GetProcAddress(hinst, "VJoy_Shutdown");
-    
-    // printf("call VJoy_Initialize.\n");
-    if(!fp_VJoy_Initialize("vJoy driver", "Image trans")) {
-        printf("Error vJoy initialize.\n");
-    }
-
-    while(1) {
-        Sleep(1000);
-
-        if (recv(*serverSocket,(char*)&com_data,sizeof(COM_DATA),0) < 0)
-        {
-            printf("ThreadOperate receive error.\n");
-            printf("Error %d occured.\n", WSAGetLastError());
-        }
-
-        printf("x:%d, y:%d, z:%d, r:%d, u:%d, v:%d\n",
-            com_data.gamepad1, com_data.gamepad2, com_data.gamepad3,
-            com_data.gamepad4, com_data.gamepad7, com_data.gamepad8 );
-        printf("pov:%d, buttons:%x\n", com_data.gamepad5, com_data.gamepad6);
-        
-        joyState[0].XAxis = com_data.gamepad1;
-        joyState[0].YAxis = com_data.gamepad2;
-        joyState[0].ZAxis = com_data.gamepad3;
-        joyState[0].Buttons = com_data.gamepad6;
-        joyState[0].POV = com_data.gamepad5;
-        joyState[0].XRotation = com_data.gamepad4;
-        joyState[0].YRotation = com_data.gamepad7;
-        joyState[0].ZRotation = com_data.gamepad8;
-        
-        if(!fp_VJoy_UpdateJoyState(1, &joyState[0])){
-            printf("Error on VJoy command injection.\n");
-        }
-
-        if ( com_data.mouse_x != mouse_x || com_data.mouse_y != mouse_y ) {
-            mouse_x = com_data.mouse_x;
-            mouse_y = com_data.mouse_y;
-            INPUT input = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_MOVE };
-            SendInput(1, &input, sizeof(INPUT));
-        } 
-
-        if (com_data.mouse_left != mouse_left ) {
-            mouse_left = com_data.mouse_left;
-            if ( mouse_left == 1 ) {
-                INPUT input = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_LEFTDOWN };
-                SendInput(1, &input, sizeof(INPUT));
-            } else if ( mouse_left == 2) {
-                INPUT input = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_LEFTUP };
-                SendInput(1, &input, sizeof(INPUT));
-            } else if ( mouse_left == 3) {
-                INPUT input1 = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_LEFTDOWN },
-                      input2 = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_LEFTUP };
-                SendInput(1, &input1, sizeof(INPUT));
-                SendInput(1, &input2, sizeof(INPUT));
-                SendInput(1, &input1, sizeof(INPUT));
-                SendInput(1, &input2, sizeof(INPUT));
-            }
-        }
-
-        if (com_data.mouse_right != mouse_right ) {
-            mouse_right = com_data.mouse_right;
-            if ( mouse_right == 1 ) {
-                INPUT input = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_RIGHTDOWN };
-                SendInput(1, &input, sizeof(INPUT));
-            } else if ( mouse_right == 2) {
-                INPUT input = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_RIGHTUP };
-                SendInput(1, &input, sizeof(INPUT));
-            } else if ( mouse_right == 3) {
-                INPUT input1 = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_RIGHTDOWN },
-                      input2 = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_RIGHTUP };
-                SendInput(1, &input1, sizeof(INPUT));
-                SendInput(1, &input2, sizeof(INPUT));
-                SendInput(1, &input1, sizeof(INPUT));
-                SendInput(1, &input2, sizeof(INPUT));
-            }
-        }
-
-        if (com_data.mouse_middle != mouse_middle ) {
-            mouse_middle = com_data.mouse_middle;
-            if ( mouse_middle == 1 ) {
-                INPUT input = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_MIDDLEDOWN };
-                SendInput(1, &input, sizeof(INPUT));
-            } else if ( mouse_middle == 2) {
-                INPUT input = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_MIDDLEUP };
-                SendInput(1, &input, sizeof(INPUT));
-            } else if ( mouse_middle == 3) {
-                INPUT input1 = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_MIDDLEDOWN },
-                      input2 = { INPUT_MOUSE, 0, 0, 0, MOUSEEVENTF_MIDDLEUP };
-                SendInput(1, &input1, sizeof(INPUT));
-                SendInput(1, &input2, sizeof(INPUT));
-                SendInput(1, &input1, sizeof(INPUT));
-                SendInput(1, &input2, sizeof(INPUT));
-            }
-        }
-
-        if (com_data.keydown == 1 ) {
-            INPUT input = { INPUT_KEYBOARD, com_data.keycode,
-                MapVirtualKey(com_data.keycode, 0),
-                KEYEVENTF_EXTENDEDKEY };
-            if (com_data.keycode_flg == 0x80) {
-                input.ki.dwFlags |= KEYEVENTF_KEYUP;
-            }
-            SendInput(1, &input, sizeof(INPUT));
-        }
-
-        if (send(*serverSocket,(char*)&com_data,sizeof(COM_DATA),0) < 0)
-        {
-            printf("ThreadOperate send error.\n");
-            printf("Error %d occured.\n", WSAGetLastError());
-        }
-    }
-
-    fp_VJoy_Shutdown();
-    FreeLibrary(hinst);
-    ExitThread(TRUE);
-    return TRUE;
-}
-*/
-
-DWORD WINAPI runOperateThread(LPVOID param) {
+void *runOperateThread(void *param) {
     COM_DATA com_data;
     Addrs addrs = *(Addrs*)param;
     SOCKET *serverSocket = addrs.socket;
     HWND targetHwnd = addrs.targetHwnd;
-    int mouse_x=0, mouse_y=0, old_mouse_x=0, old_mouse_y=0;
+    int mouse_x=0, mouse_y=0/*, old_mouse_x=0, old_mouse_y=0*/;
     int mouse_left=0, mouse_right=0, mouse_middle=0, mouse_wheel=0;
     int vJoyId = 1;
     POINT pt;
@@ -878,12 +433,13 @@ DWORD WINAPI runOperateThread(LPVOID param) {
         }
 
         /*
-        printf("x:%d, y:%d, z:%d, r:%d, u:%d, v:%d\n",
+        printf("x:%ld, y:%ld, z:%ld, r:%ld, u:%ld, v:%ld\n",
             com_data.gamepad1, com_data.gamepad2, com_data.gamepad3,
             com_data.gamepad4, com_data.gamepad7, com_data.gamepad8 );
-        printf("pov:%d, buttons:%x\n", com_data.gamepad5, com_data.gamepad6);
+        printf("pov:%ld, buttons:%lx\n", com_data.gamepad5, com_data.gamepad6);
         */
 
+        // for DirectInput
         iReport.wAxisX=com_data.gamepad1 / 2;
         iReport.wAxisY=com_data.gamepad2 / 2;
         iReport.wAxisZ=com_data.gamepad3 / 2;
@@ -993,27 +549,27 @@ DWORD WINAPI runOperateThread(LPVOID param) {
     }
 
     RelinquishVJD(vJoyId);
-    ExitThread(TRUE);
-    return TRUE;
+    // ExitThread(TRUE);
+    return 0;
 }
 
-DWORD WINAPI runImageThread(LPVOID param) {
+void *runImageThread(void *param) {
 
     COM_DATA com_data;
-    DWORD dwLoadSize;
+    // DWORD dwLoadSize;
     RECT rc;
     Addrs addrs = *(Addrs*)param;
     SOCKET *serverSocket = addrs.socket;
     HWND targetHwnd = addrs.targetHwnd;
-    BITMAP bitmap;
+    // BITMAP bitmap;
     BITMAPFILEHEADER bitmapFileHeader;
     BITMAPINFO bmpInfo;
     LPDWORD lpPixel;
     const int offset = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    DWORD lineSizeDW, imageSize;
+    DWORD lineSizeDW, imageSize, bmpFileSize;
     HDC targetHdc, hdc;
     HBITMAP hBitmap;
-    BOOL succeedBitBlt;
+    // BOOL succeedBitBlt;
     BYTE *bmpData;
     int width, height, oldWidth = 0, oldHeight = 0;
 
@@ -1032,9 +588,10 @@ DWORD WINAPI runImageThread(LPVOID param) {
     bmpInfo.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
 
     LOG_INFO("Image thread started.\n");
+    // fileWriteReadTest();
 
     while(1) {
-        Sleep(10);
+        // Sleep(1000);
         GetWindowRect(targetHwnd, &rc);
         width = rc.right-rc.left;
         height = rc.bottom-rc.top;
@@ -1048,10 +605,10 @@ DWORD WINAPI runImageThread(LPVOID param) {
         //imageSize = (int)ceil((double)lineSizeDW / (double)sizeof(DWORD)) * sizeof(DWORD) * height;
         imageSize = (lineSizeDW % 4 == 0 ? lineSizeDW : (lineSizeDW / 4)*4+4 ) * height;
 
-        dwLoadSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + imageSize;
+        bmpFileSize = offset + imageSize;
         //LOG_INFO("File size:%d = %d + %d + %d\n", dwLoadSize,
         //    sizeof(BITMAPFILEHEADER), sizeof(BITMAPINFOHEADER), imageSize);
-        bitmapFileHeader.bfSize = offset + imageSize;
+        bitmapFileHeader.bfSize = bmpFileSize;
         //DIBの情報を設定する
         bmpInfo.bmiHeader.biWidth=width;
         bmpInfo.bmiHeader.biHeight=height;
@@ -1063,21 +620,46 @@ DWORD WINAPI runImageThread(LPVOID param) {
         hdc = CreateCompatibleDC(targetHdc);
         hBitmap = CreateDIBSection(targetHdc, &bmpInfo, DIB_RGB_COLORS,(void**)&lpPixel,NULL,0);
         SelectObject(hdc,hBitmap);
-        succeedBitBlt = BitBlt(hdc, 0, 0, width, height, targetHdc, rc.left, rc.top, SRCCOPY);
-        bmpData = (BYTE*)malloc(sizeof(bitmapFileHeader) + sizeof(bmpInfo.bmiHeader) + imageSize);
+        BitBlt(hdc, 0, 0, width, height, targetHdc, rc.left, rc.top, SRCCOPY);
+        bmpData = (BYTE*)malloc(bmpFileSize);
         memcpy(bmpData,&bitmapFileHeader,sizeof(bitmapFileHeader));
         memcpy(bmpData+sizeof(bitmapFileHeader),&bmpInfo.bmiHeader,sizeof(bmpInfo.bmiHeader));
         memcpy(bmpData+sizeof(bitmapFileHeader)+sizeof(bmpInfo.bmiHeader), lpPixel, imageSize);
 
-        BYTE* jpegData;
-        unsigned long jpegSize;
         // LOG_INFO("Image data size: %d bytes.\n", dwLoadSize);
         // LOG_DEBUG("Convert image to jpeg.\n");
         
-        bmp2jpg(bmpData, dwLoadSize, width, height, &jpegData, &jpegSize);
-
-        //com_data.data_size = dwLoadSize;
+        // Using JPEG
+        /*
+        BYTE* jpegData;
+        unsigned long jpegSize;
+        bmp2jpg(bmpData, bitmapFileHeader.bfSize, width, height, &jpegData, &jpegSize);
         com_data.data_size = jpegSize;
+        */
+        //Using VP9
+        /*
+        unsigned char* vpxData=NULL;
+        long vpxSize=0;
+        bmp2vpx((unsigned char*)bmpData, width, height, &vpxData, &vpxSize);
+        // readDummyVpx(&vpxData, &vpxSize);
+        com_data.data_size = vpxSize;
+        */
+
+        //using zlib
+        /*
+        unsigned char* zData=NULL;
+        unsigned long zSize=0;
+        bmp2z(bmpData, bmpFileSize, &zData, &zSize);
+        com_data.data_size = zSize;
+        com_data.original_size = bmpFileSize;
+        */
+        //using lz4
+        unsigned char* lz4Data=NULL;
+        unsigned long lz4Size=0;
+        bmp2lz4(bmpData, bmpFileSize, &lz4Data, &lz4Size);
+        com_data.data_size = lz4Size;
+        com_data.original_size = bmpFileSize;
+
         // LOG_DEBUG("Sending image header data.\n");
         if (send(*serverSocket,(char*)&com_data,sizeof(COM_DATA),0) < 0)
         {
@@ -1087,79 +669,197 @@ DWORD WINAPI runImageThread(LPVOID param) {
 
         //if (send(*serverSocket,(char*)bmpData,dwLoadSize,0) < 0)
         // LOG_DEBUG("Sending image data.\n");
-        if (send(*serverSocket,(char*)jpegData,jpegSize,0) < 0)
+        // if (send(*serverSocket,(char*)jpegData,jpegSize,0) < 0)
+        // if (send(*serverSocket,(char*)vpxData,vpxSize,0) < 0)
+        // if (send(*serverSocket,(char*)zData,zSize,0) < 0)
+        if (send(*serverSocket,(char*)lz4Data,lz4Size,0) < 0)
         {
             LOG_ERROR("ThreadImage send error(image).\n");
             LOG_ERROR("Error %d occured.\n", WSAGetLastError());
         }
+        // LOG_DEBUG("Image was sent.\n");
         ReleaseDC(targetHwnd, targetHdc);
         DeleteDC(hdc);
         DeleteObject(hBitmap);
         free(bmpData);
+        free(lz4Data);
+        // free(zData);
+        // free(vpxData);
+        // free(jpegData);
     }
     /* メモリブロックのロック解除 */
     //GlobalUnlock(hBuf);
-    ExitThread(TRUE);
-    return TRUE;
+    //ExitThread(TRUE);
+    return 0;
 }
 
-DWORD WINAPI runSoundThread_alt(LPVOID param) {
+void *runImageThreadUDP(void *param) {
 
     COM_DATA com_data;
+    // DWORD dwLoadSize;
+    RECT rc;
     Addrs addrs = *(Addrs*)param;
-    long samplerate = com_data.samplerate;
-    long sound_size = com_data.data_size;
+    struct sockaddr_in cliAddress;
     SOCKET *serverSocket = addrs.socket;
-    byte* waveData;
-    long dataSize;
+    HWND targetHwnd = addrs.targetHwnd;
+    // BITMAP bitmap;
+    BITMAPFILEHEADER bitmapFileHeader;
+    BITMAPINFO bmpInfo;
+    LPDWORD lpPixel;
+    const int offset = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    DWORD lineSizeDW, imageSize, bmpFileSize;
+    HDC targetHdc, hdc;
+    HBITMAP hBitmap;
+    // BOOL succeedBitBlt;
+    BYTE *bmpData;
+    int width, height, oldWidth = 0, oldHeight = 0;
 
-    waveData = readSoundData(&dataSize);
+    bitmapFileHeader.bfType = 0x4d42;
+    bitmapFileHeader.bfReserved1 = 0;
+    bitmapFileHeader.bfReserved2 = 0;
+    bitmapFileHeader.bfOffBits = offset;
 
+    bmpInfo.bmiHeader.biPlanes=1;
+    bmpInfo.bmiHeader.biBitCount=24;
+    bmpInfo.bmiHeader.biCompression=BI_RGB;
+    bmpInfo.bmiHeader.biXPelsPerMeter = 0;
+    bmpInfo.bmiHeader.biYPelsPerMeter = 0;
+    bmpInfo.bmiHeader.biClrUsed = 0;
+    bmpInfo.bmiHeader.biClrImportant = 0;
+    bmpInfo.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
 
-    // CoInitialize(NULL);
-    // DirectSoundCaptureCreate8( NULL, &captureDevice, NULL );
+    LOG_INFO("Image thread started.\n");
+    // fileWriteReadTest();
+    // for getting client address
+    char tmpBuf[1500];
+    int len = sizeof(cliAddress);
+    recvfrom(*serverSocket, tmpBuf, sizeof(tmpBuf), 
+            0, (struct sockaddr*)&cliAddress,&len);
+    LOG_INFO("Connected: %s:%d\n", inet_ntoa(cliAddress.sin_addr) , ntohs(cliAddress.sin_port));
 
-    // DirectSoundEnumerate((LPDSENUMCALLBACK)DSEnumProc, (VOID*)NULL);
+    while(1) {
+        //Sleep(500);
+        GetWindowRect(targetHwnd, &rc);
+        width = rc.right-rc.left;
+        height = rc.bottom-rc.top;
+        if ( width != oldWidth || height != oldHeight) {
+            com_data.server_cx = oldWidth = width;
+            com_data.server_cy = oldHeight = height;
+            // LOG_INFO("server rect size changed:%d, %d\n", width, height);
+        }
+        // ファイルサイズ計算
+        lineSizeDW = (bmpInfo.bmiHeader.biBitCount / 8) * width;
+        //imageSize = (int)ceil((double)lineSizeDW / (double)sizeof(DWORD)) * sizeof(DWORD) * height;
+        imageSize = (lineSizeDW % 4 == 0 ? lineSizeDW : (lineSizeDW / 4)*4+4 ) * height;
 
-    LOG_INFO("Sound thread started.\n");
+        bmpFileSize = offset + imageSize;
+        //LOG_INFO("File size:%d = %d + %d + %d\n", dwLoadSize,
+        //    sizeof(BITMAPFILEHEADER), sizeof(BITMAPINFOHEADER), imageSize);
+        bitmapFileHeader.bfSize = bmpFileSize;
+        //DIBの情報を設定する
+        bmpInfo.bmiHeader.biWidth=width;
+        bmpInfo.bmiHeader.biHeight=height;
+        // bmpInfo.bmiHeader.biSizeImage = imageSize;
+        bmpInfo.bmiHeader.biSizeImage = 0; // Follow libjpeg-turbo specification 
 
-    while(1){
+        // targetHdc = GetWindowDC(targetHwnd);
+        targetHdc = GetWindowDC(GetDesktopWindow());
+        hdc = CreateCompatibleDC(targetHdc);
+        hBitmap = CreateDIBSection(targetHdc, &bmpInfo, DIB_RGB_COLORS,(void**)&lpPixel,NULL,0);
+        SelectObject(hdc,hBitmap);
+        BitBlt(hdc, 0, 0, width, height, targetHdc, rc.left, rc.top, SRCCOPY);
+        bmpData = (BYTE*)malloc(bmpFileSize);
+        memcpy(bmpData,&bitmapFileHeader,sizeof(bitmapFileHeader));
+        memcpy(bmpData+sizeof(bitmapFileHeader),&bmpInfo.bmiHeader,sizeof(bmpInfo.bmiHeader));
+        memcpy(bmpData+sizeof(bitmapFileHeader)+sizeof(bmpInfo.bmiHeader), lpPixel, imageSize);
 
-        Sleep(10000);
-
+        // LOG_INFO("Image data size: %d bytes.\n", dwLoadSize);
+        // LOG_DEBUG("Convert image to jpeg.\n");
         
-        com_data.data_size = dataSize;
-        com_data.samplerate = SAMPLERATE;
+        // Using JPEG
+        /*
+        BYTE* jpegData;
+        unsigned long jpegSize;
+        bmp2jpg(bmpData, bitmapFileHeader.bfSize, width, height, &jpegData, &jpegSize);
+        com_data.data_size = jpegSize;
+        */
+        //Using VP9
+        /*
+        unsigned char* vpxData=NULL;
+        long vpxSize=0;
+        bmp2vpx((unsigned char*)bmpData, width, height, &vpxData, &vpxSize);
+        // readDummyVpx(&vpxData, &vpxSize);
+        com_data.data_size = vpxSize;
+        */
 
-        if (send(*serverSocket,(char*)&com_data,sizeof(COM_DATA),0) < 0)
-        {
-            LOG_ERROR("ThreadSound send error(header).\n");
-            LOG_ERROR("Error %d occured.\n", WSAGetLastError());
-        }
+        //using zlib
+        /*
+        unsigned char* zData=NULL;
+        unsigned long zSize=0;
+        bmp2z(bmpData, bmpFileSize, &zData, &zSize);
+        com_data.data_size = zSize;
+        com_data.original_size = bmpFileSize;
+        */
+        //using lz4
+        unsigned char* lz4Data=NULL;
+        unsigned long lz4Size=0;
+        bmp2lz4(bmpData, bmpFileSize, &lz4Data, &lz4Size);
+        com_data.data_size = lz4Size+sizeof(COM_DATA);
+        com_data.original_size = bmpFileSize;
+        memcpy(lz4Data+lz4Size, &com_data, sizeof(COM_DATA));
 
-        if (send(*serverSocket, (char*)waveData, dataSize, 0) < 0)
+        // LOG_DEBUG("Sending image header data.\n");
+        //if (send(*serverSocket,(char*)&com_data,sizeof(COM_DATA),0) < 0)
+        //{
+        //    LOG_ERROR("ThreadImage send error(header).\n");
+        //    LOG_ERROR("Error %d occured.\n", WSAGetLastError());
+        //}
+
+        //if (send(*serverSocket,(char*)bmpData,dwLoadSize,0) < 0)
+        // LOG_DEBUG("Sending image data.\n");
+        // if (send(*serverSocket,(char*)jpegData,jpegSize,0) < 0)
+        // if (send(*serverSocket,(char*)vpxData,vpxSize,0) < 0)
+        // if (send(*serverSocket,(char*)zData,zSize,0) < 0)
+        int ret = sendto(*serverSocket,(char*)lz4Data,lz4Size+sizeof(COM_DATA),0,
+            (struct sockaddr*)&cliAddress, sizeof(cliAddress));
+        if ( ret < 0)
         {
-            LOG_ERROR("ThreadSound send error(sound).\n");
+            LOG_ERROR("ThreadImage send error(image).\n");
             LOG_ERROR("Error %d occured.\n", WSAGetLastError());
-            //printf("wavedata %x, size:%d\n", waveData, dataSize);
+        } else {
+            //LOG_INFO("Sent %d bytes.\n", ret);
         }
+        // LOG_DEBUG("Image was sent.\n");
+        ReleaseDC(targetHwnd, targetHdc);
+        DeleteDC(hdc);
+        DeleteObject(hBitmap);
+        free(bmpData);
+        free(lz4Data);
+        // free(zData);
+        // free(vpxData);
+        // free(jpegData);
     }
-
-    CoUninitialize();
-
-    ExitThread(TRUE);
-    return TRUE;
+    /* メモリブロックのロック解除 */
+    //GlobalUnlock(hBuf);
+    //ExitThread(TRUE);
+    return 0;
 }
 
-DWORD WINAPI runSoundThread(LPVOID param) {
+void *runSoundThread(void *param) {
 
     COM_DATA com_data;
     Addrs addrs = *(Addrs*)param;
-    long samplerate = com_data.samplerate;
-    long sound_size = com_data.data_size;
+    // long samplerate = com_data.samplerate;
+    // long sound_size = com_data.data_size;
     SOCKET *serverSocket = addrs.socket;
-    byte* waveData;
-    long dataSize;
+    // byte* waveData;
+    long dataSize=0;
+
+    const int SAMPLE_RATE = 48000;
+    // const int APPLICATION = OPUS_APPLICATION_AUDIO;
+    const int FRAME_SIZE = 64;
+    // const int MAX_PACKET_SIZE = SAMPLE_RATE*8;
+    // const int MAX_FRAME_SIZE = 6*960;
 
     LPDIRECTSOUNDCAPTURE captureDevice = NULL;//DirectSoundCaptureDeviceオブジェクト
     LPDIRECTSOUNDCAPTUREBUFFER captureBuffer = NULL;//DirectSoundCaptureBufferオブジェクト
@@ -1169,12 +869,12 @@ DWORD WINAPI runSoundThread(LPVOID param) {
     DSCBUFFERDESC bufferDescriber
         = {sizeof(DSCBUFFERDESC), 0, wfx.nAvgBytesPerSec*1, 0, &wfx, 0, NULL};
     DWORD readablePos, capturedPos, readBufferPos, lockLength, capturedLength, wrappedCapturedLength;
-    DWORD copiedLength = 0;
+    // DWORD copiedLength = 0;
     void *capturedData = NULL, *wrappedCapturedData = NULL;
     char *copiedBuffer;
     int recordDurationSec = 3; //録音時間(秒)
     HRESULT Hret;
-    time_t start, end;
+    // time_t start, end;
 
     CoInitialize(NULL);
     DirectSoundCaptureCreate8( NULL, &captureDevice, NULL );
@@ -1185,14 +885,33 @@ DWORD WINAPI runSoundThread(LPVOID param) {
     copiedBuffer = (char*)malloc(
         wfx.nAvgBytesPerSec * wfx.nChannels * wfx.wBitsPerSample / 8 * recordDurationSec * 2); 
     captureDevice->CreateCaptureBuffer(&bufferDescriber,&captureBuffer,NULL);
-    start = time(NULL);
+    // start = time(NULL);
     captureBuffer->Start(DSCBSTART_LOOPING);
 
     LOG_INFO("Sound thread started.\n");
 
+    /*
+    OpusCustomMode *mode;
+    OpusCustomEncoder *encoder;
+    int err;
+    mode = opus_custom_mode_create(SAMPLE_RATE, FRAME_SIZE, &err);
+    if (err<0)
+    {
+        LOG_ERROR("failed to create an mode: %s\n", opus_strerror(err));
+        // return EXIT_FAILURE;
+    }
+
+    encoder = opus_custom_encoder_create(mode, CHANNELS, &err);
+    if (err<0)
+    {
+        LOG_ERROR("failed to create an encoder: %s\n", opus_strerror(err));
+        // return EXIT_FAILURE;
+    }
+    */
+
     while(1){
 
-        Sleep(10);
+        // Sleep(10);
 
         captureBuffer->GetCurrentPosition(&capturedPos, &readablePos);
         if  ( readablePos > readBufferPos ) lockLength = readablePos - readBufferPos;
@@ -1205,7 +924,7 @@ DWORD WINAPI runSoundThread(LPVOID param) {
             &wrappedCapturedData, &wrappedCapturedLength,
             0);
         if( Hret != DS_OK ) {
-            LOG_ERROR("Lock error:%x\n", Hret);
+            LOG_ERROR("Lock error:%ld\n", Hret);
         } else {
             // printf("buffer read, buf1:%d, buf2:%d\n", capturedLength, wrappedCapturedLength);
         }
@@ -1226,10 +945,18 @@ DWORD WINAPI runSoundThread(LPVOID param) {
             dataSize += wrappedCapturedLength;
         }
 
+        // writeWaveFile(copiedBuffer, dataSize, (char*)"beforeConvert.wav");
+        // LOG_INFO("sent pcm data size:%ld\n", dataSize);
+
         Hret = captureBuffer->Unlock( capturedData, capturedLength,
             wrappedCapturedData, wrappedCapturedLength);
-        
+        /*
+        unsigned char *cbits;
+        int opusSize = pcm2opus(encoder, copiedBuffer, dataSize, &cbits);
+        */
+
         com_data.data_size = dataSize;
+        // com_data.data_size = opusSize;
         com_data.samplerate = SAMPLERATE;
 
         if (send(*serverSocket,(char*)&com_data,sizeof(COM_DATA),0) < 0)
@@ -1239,25 +966,27 @@ DWORD WINAPI runSoundThread(LPVOID param) {
         }
 
         if (send(*serverSocket, (char*)copiedBuffer, dataSize, 0) < 0)
+        // if (send(*serverSocket, (char*)cbits, opusSize, 0) < 0)
         {
             LOG_ERROR("ThreadSound send error(sound).\n");
             LOG_ERROR("Error %d occured.\n", WSAGetLastError());
             // printf("wavedata %x, size:%d\n", waveData, dataSize);
         }
+        // free(cbits);
     }
 
     captureBuffer->Stop();
     free(copiedBuffer);
     CoUninitialize();
 
-    ExitThread(TRUE);
-    return TRUE;
+    // ExitThread(TRUE);
+    return 0;
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd , UINT msg , WPARAM wp , LPARAM lp) {
-	HDC hdc;
-	PAINTSTRUCT ps;
-	int x;
+	// HDC hdc;
+	// PAINTSTRUCT ps;
+	// int x;
 
 	switch (msg) {
 	case WM_DESTROY:
@@ -1282,6 +1011,7 @@ int WINAPI WinMain(HINSTANCE hInstance , HINSTANCE hPrevInstance ,
 	HWND hwnd;
 	MSG msg;
 	WNDCLASS winc;
+    char g_encryption_key[16];
 
 	winc.style		= CS_HREDRAW | CS_VREDRAW;
 	winc.lpfnWndProc	= WndProc;
@@ -1318,8 +1048,8 @@ int WINAPI WinMain(HINSTANCE hInstance , HINSTANCE hPrevInstance ,
     ofn.nMaxFileTitle = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST;
 
-    //GetOpenFileName(&ofn);
-    strcpy(szFile, "notepad.exe"); // Spqcify Notepad.exe for debug
+    // GetOpenFileName(&ofn);
+    strcpy(szFile, "notepad.exe"); // Specify Notepad.exe for debug
     
     //プロセス名からウィンドウハンドルの取得
     HWND targetHwnd = getWindowHandleFileName(szFile);
@@ -1331,41 +1061,101 @@ int WINAPI WinMain(HINSTANCE hInstance , HINSTANCE hPrevInstance ,
     strcpy(g_encryption_key, "1234");
 	WSADATA wsadata;
 	WSAStartup(MAKEWORD(1,1),&wsadata);
-    SOCKET listensock;
-    SOCKADDR_IN addr;
-    if (startListen(&listensock, addr) != 0 ) {
+    SOCKET listensock, udpListenSock;
+    // SOCKADDR_IN addr;
+    if (startListen(&listensock) != 0 ) {
         LOG_ERROR("Socket error\n");
     }
+
+    // UDP bind
+    /*
+    if (startListenUDP(&udpListenSock) != 0) {
+        LOG_ERROR("Udp socket error");
+    }
+    */
+
+    // fileWriteReadTest();
     // printf("Listen socket created:%d\n", listensock);
     SOCKET serverSocket[3];
-    HANDLE threadHandle[3];
-    struct Addrs addrs;
+    // HANDLE threadHandle[3];
+    pthread_t pthread[3];
+    Addrs addrs;
     addrs.hwnd = hwnd;
     addrs.targetHwnd = targetHwnd;
+
+    /*
     for(int i=0;i<3;i++){
         serverSocket[i] = socket(AF_INET, SOCK_STREAM, 0);
         // printf("Server socket[%d] created:listen%d, server%d\n", i, listensock, serverSocket[i]);
         while(1){
-            acceptLoop(&listensock, &serverSocket[i]);
-            if ( serverSocket[i] != -1 ) break;
+            int ret = acceptLoop(&listensock, &serverSocket[i]);
+            if ( ret != -1 ) break;
         }
         addrs.socket = &serverSocket[i];
         switch(i) {
             case 0:
-                threadHandle[i] = CreateThread(0,0,runOperateThread,(LPVOID)&addrs,0,0);
+                // threadHandle[i] = CreateThread(0,0,runOperateThread,(LPVOID)&addrs,0,0);
+                if (pthread_create(&pthread[i], NULL, runOperateThread, &addrs) != 0 ){
+                    LOG_DEBUG("Error occured to operate thread run.\n");
+                }
                 break;
             case 1:
-                threadHandle[i] = CreateThread(0,0,runImageThread,(LPVOID)&addrs,0,0);
+                // threadHandle[i] = CreateThread(0,0,runImageThread,(LPVOID)&addrs,0,0);
+                if (pthread_create(&pthread[i], NULL, runImageThread, &addrs) != 0 ){
+                    LOG_DEBUG("Error occured to image thread run.\n");
+                }
                 break;
             case 2:
-                threadHandle[i] = CreateThread(0,0,runSoundThread,(LPVOID)&addrs,0,0);
-                //threadHandle[i] = CreateThread(0,0,runSoundThread_alt,(LPVOID)&addrs,0,0);
+                // threadHandle[i] = CreateThread(0,0,runSoundThread,(LPVOID)&addrs,0,0);
+                //if (pthread_create(&pthread[i], NULL, runSoundThread, &addrs) != 0 ){
+                //    LOG_DEBUG("Error occured to sound thread run.\n");
+                //}
                 break;
         }
     }
+    */
+
+    // operate thread
+    serverSocket[0] = socket(AF_INET, SOCK_STREAM, 0);
+    int ret = acceptLoop(&listensock, &serverSocket[0]);
+    if (ret==-1) {
+        LOG_ERROR("sock0 accept error\n");
+    }
+    addrs.socket = &serverSocket[0];
+    if (pthread_create(&pthread[0], NULL, runOperateThread, &addrs) != 0 ){
+        LOG_DEBUG("Error occured to operate thread run.\n");
+    }
+
+    // image thread
+
+    startListenUDP(&serverSocket[1]);
+    //ret = acceptLoop(&listensock, &serverSocket[1]);
+    //if (ret==-1) {
+    //    LOG_ERROR("sock1 accept error\n");
+    //}
+    addrs.socket = &serverSocket[1];
+    if (pthread_create(&pthread[1], NULL, runImageThreadUDP, &addrs) != 0 ){
+        LOG_DEBUG("Error occured to image thread run.\n");
+    }
+
+    /*
+    // sound thread
+    serverSocket[2] = socket(AF_INET, SOCK_STREAM, 0);
+    ret = acceptLoop(&listensock, &serverSocket[2]);
+    if (ret==-1) {
+        LOG_ERROR("sock2 accept error\n");
+    }
+    
+    addrs.socket = &serverSocket[2];
+    if (pthread_create(&pthread[2], NULL, runSoundThread, &addrs) != 0 ){
+        LOG_DEBUG("Error occured to sound thread run.\n");
+    }
+    */
+
 	while(GetMessage(&msg , NULL , 0 , 0)) {
 		TranslateMessage(&msg);
 		DispatchMessage(&msg);
 	}
+    
 	return msg.wParam;
 }
